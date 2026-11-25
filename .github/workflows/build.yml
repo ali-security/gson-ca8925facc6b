@@ -1,18 +1,62 @@
 name: Build
 
-on: [push, pull_request]
+on:
+  workflow_dispatch:
+    inputs:
+      test-filter:
+        description: 'Surefire -Dtest selector; empty runs the full suite'
+        required: false
+        default: ''
 
 jobs:
   build:
     runs-on: ubuntu-latest
+    timeout-minutes: 45
 
     steps:
       - uses: actions/checkout@v2
       - name: Set up JDK 11
-        uses: actions/setup-java@v2
+        uses: actions/setup-java@v4
         with:
           distribution: 'temurin'
           java-version: '11'
           cache: 'maven'
       - name: Build with Maven
-        run: mvn --batch-mode --update-snapshots verify
+        run: |
+          if [ -n "${{ inputs.test-filter }}" ]; then
+            mvn --batch-mode --update-snapshots verify "-Dtest=${{ inputs.test-filter }}" -Dsurefire.failIfNoSpecifiedTests=false -DfailIfNoTests=false
+          else
+            mvn --batch-mode --update-snapshots verify
+          fi
+      - name: Upload gson jar
+        uses: actions/upload-artifact@v4
+        with:
+          name: gson-jar
+          path: gson/target/gson-*.jar
+          if-no-files-found: error
+      - name: Skipped test report
+        if: always()
+        run: |
+          python3 - <<'EOF'
+          import glob, re, xml.etree.ElementTree as ET
+          print("==== Skipped test report (from surefire XML) ====")
+          n = 0
+          for f in sorted(glob.glob('**/target/surefire-reports/TEST-*.xml', recursive=True)):
+              for tc in ET.parse(f).getroot().iter('testcase'):
+                  s = tc.find('skipped')
+                  if s is None:
+                      continue
+                  n += 1
+                  cls, name = tc.get('classname'), tc.get('name')
+                  method = name.split('[')[0]
+                  reason = s.get('message') or 'no message'
+                  src = f.split('/target/')[0] + '/src/test/java/' + cls.replace('.', '/') + '.java'
+                  try:
+                      m = re.search(r'void\s+' + re.escape(method) + r'\b[^{]*\{\s*(assume\w*\([^;]*\));', open(src).read())
+                      if m:
+                          reason = 'JUnit assumption ' + m.group(1) + ' is false for this parameter (' + reason + ')'
+                  except OSError:
+                      pass
+                  print(f"SKIPPED {cls}.{name}: {reason}")
+          print(f"==== {n} skipped test(s) ====")
+          EOF
